@@ -121,6 +121,26 @@ type Config struct {
 		BillingBase string `json:"billing_base"`
 	} `json:"global"`
 
+	// OfficeAce "oa:" realm 独立通道（华为云 AgentArts ModelArts 网关）。
+	// 与 WorkBuddy 账号池完全独立：单一静态 Basic 凭证，不选号/不冷却。
+	// app_key / app_secret 为空时回落读环境变量 OFFICEACE_APP_KEY / OFFICEACE_APP_SECRET
+	//（密钥不落盘的部署方式）；两者最终仍为空则视为未启用，oa: 模型返回 503。
+	OfficeAce struct {
+		// Enabled 路由开关。缺省 false：未配置凭证的部署完全不受影响；
+		// 配了凭证但忘开开关同样不生效（显式 opt-in，避免半配置状态静默分流）。
+		Enabled bool `json:"enabled"`
+		// BaseURL 模型网关地址；空 = 回落内置官方地址（internal/officeace.DefaultBaseURL，
+		// 与桌面端当前下发的 model_api_url_base 一致）。带实例编号，不同账号可能
+		// 不同——从桌面端凭证 modelInfo.model_api_url_base 抄过来最稳。
+		BaseURL string `json:"base_url"`
+		// AppKey / AppSecret Basic 鉴权对（桌面端凭证 modelInfo.model_auth_info 的
+		// model_app_key / model_app_secret）。
+		AppKey    string `json:"app_key"`
+		AppSecret string `json:"app_secret"`
+		// TimeoutSeconds 单请求总时长上限（含 SSE 全程），<=0 回落 300s。
+		TimeoutSeconds int `json:"timeout_seconds"`
+	} `json:"officeace"`
+
 	Upstream struct {
 		// TimeoutSeconds 短 RPC（refresh/checkin/balance/FetchModels）总时长上限，默认 120。
 		TimeoutSeconds int `json:"timeout_seconds"`

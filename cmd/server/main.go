@@ -19,6 +19,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/officeace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
@@ -165,6 +166,29 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
+	// officeace（"oa:" realm）独立通道：config 之外允许环境变量兜底凭证
+	//（密钥不落 config 文件的部署方式）。凭证最终为空时 client 为 nil = 未启用。
+	oaKey, oaSecret := cfg.OfficeAce.AppKey, cfg.OfficeAce.AppSecret
+	if oaKey == "" {
+		oaKey = os.Getenv("OFFICEACE_APP_KEY")
+	}
+	if oaSecret == "" {
+		oaSecret = os.Getenv("OFFICEACE_APP_SECRET")
+	}
+	var oaClient *officeace.Client
+	if cfg.OfficeAce.Enabled {
+		oaClient = officeace.New(officeace.Config{
+			BaseURL:        cfg.OfficeAce.BaseURL,
+			AppKey:         oaKey,
+			AppSecret:      oaSecret,
+			TimeoutSeconds: cfg.OfficeAce.TimeoutSeconds,
+		})
+		if oaClient == nil {
+			log.Printf("officeace 通道已启用但缺少凭证（config officeace.app_key/app_secret 或环境变量 OFFICEACE_APP_KEY/OFFICEACE_APP_SECRET），oa: 模型将返回 503")
+		} else {
+			log.Printf("officeace 通道已启用：%s", oaClient.BaseURL())
+		}
+	}
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
@@ -310,6 +334,8 @@ func main() {
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// officeace "oa:" 独立通道（nil = 未启用，oa: 模型 503）。
+		OfficeAce: oaClient,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -41,6 +41,13 @@
     "chat_base": "",
     "billing_base": ""
   },
+  "officeace": {
+    "enabled": false,
+    "base_url": "",
+    "app_key": "",
+    "app_secret": "",
+    "timeout_seconds": 300
+  },
   "upstream": {
     "timeout_seconds": 120,
     "header_timeout_seconds": 120,

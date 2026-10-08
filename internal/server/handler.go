@@ -20,6 +20,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/officeace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
@@ -74,6 +75,11 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// OfficeAce "oa:" realm 独立通道客户端（华为云 AgentArts 网关，Basic 静态凭证）。
+	// nil = 未启用（ oa: 模型返回 503 officeace_disabled）。与 WorkBuddy 池完全独立，
+	// 不参与选号/冷却/粘性。
+	OfficeAce *officeace.Client
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -428,6 +434,21 @@ func (h *Handler) modelList() []map[string]any {
 			out = append(out, entry)
 		}
 	}
+	// officeace（"oa:" realm）模型名单：客户端未配置（nil）时静默跳过。
+	// 名单来自上游 /v2/models 动态拉取（1h 缓存，失败回退上次成功值/空）。
+	// 失败不阻塞 cn/global 名单输出——oa 域请求会拿到明确的 503/上游状态码。
+	if h.cfg.OfficeAce.Enabled() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		for _, id := range h.cfg.OfficeAce.Models(ctx) {
+			out = append(out, map[string]any{
+				"id":       "oa:" + id,
+				"object":   "model",
+				"created":  1753600000,
+				"owned_by": "officeace",
+			})
+		}
+		cancel()
+	}
 	return out
 }
 
@@ -543,6 +564,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
 	}
 	defer st.done()
+
+	// OfficeAce 独立通道（realm "oa"）：不进 WorkBuddy 池，无选号/粘性/轮换/
+	// 冷却语义，进入选号循环前直接透传转发并结束本请求。统计走同一个 chatStat
+	// 与 usage.Recorder（realm 记 "oa"、uid 记 "officeace"），日志口径一致。
+	if realm == "oa" {
+		h.officeaceChat(w, r, body, bareModel, peek.Stream, st)
+		return
+	}
 
 	tried := map[string]bool{}
 	var lastErr error

@@ -210,6 +210,32 @@ flowchart LR
 
 上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
 
+### OfficeAce 独立通道（"oa:" realm）
+
+除 CodeBuddy 账号池外，网关支持把 **OfficeAce 桌面端**（华为云 AgentArts 订阅）的模型额度作为独立上游接入。该通道与账号池完全独立——单一静态 Basic 凭证（`model_app_key`/`model_app_secret`，来自 OfficeAce 桌面端的华为云登录凭证），不选号、不冷却、不粘性，失败原样透传上游状态码。
+
+```jsonc
+// config.json
+"officeace": {
+  "enabled": true,                // 显式 opt-in；false 时 oa: 模型 503
+  "base_url": "",                 // 空 = 内置官方网关；不同账号实例编号可能不同，
+                                  // 从桌面端凭证 modelInfo.model_api_url_base 抄最稳
+  "app_key": "",                  // 桌面端凭证 modelInfo.model_auth_info.model_app_key
+  "app_secret": "",               // 同上 model_app_secret；也可用环境变量
+                                  // OFFICEACE_APP_KEY / OFFICEACE_APP_SECRET 兜底
+  "timeout_seconds": 300
+}
+```
+
+使用方式：模型名加 `oa:` 前缀即可，`/v1/models` 会自动列出该通道模型（`owned_by: "officeace"`）：
+
+```
+POST /v1/chat/completions
+{"model": "oa:glm-5.3", "messages": [...]}
+```
+
+上游是标准 OpenAI 兼容协议（含 SSE 流式），`reasoning_content` 字段原样透传；用量计入 `oa` realm（uid `officeace`），与账号池在用量视图天然区分。凭证获取方式见仓库外文档（OfficeAce 桌面端 `~/Library/Application Support/OfficeClaw/secrets/oauth-*.json`，AES-256-GCM，key = sha256(`.oauth-profile-encryption-key` 内容)）。
+
 ## 快速开始
 
 ### 环境要求
