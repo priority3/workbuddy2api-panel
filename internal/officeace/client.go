@@ -52,7 +52,10 @@ type Config struct {
 type Client struct {
 	baseURL string
 	auth    string // 预计算的 "Basic xxx"
-	http    *http.Client
+	// appKey / appSecret 原文：面板部分字段测试时补齐用（见 Creds）。
+	appKey    string
+	appSecret string
+	http      *http.Client
 
 	mu              sync.Mutex
 	models          []string
@@ -85,19 +88,38 @@ func New(cfg Config) *Client {
 	// HTTP(S)_PROXY 指向出海代理，让这类请求绕代理既不稳定也无必要。
 	//（与桌面端行为一致——App 内部请求 model_api_url_base 也不走系统代理。）
 	transport := &http.Transport{Proxy: nil}
+	key := strings.TrimSpace(cfg.AppKey)
+	secret := strings.TrimSpace(cfg.AppSecret)
 	return &Client{
 		baseURL: base,
 		auth: "Basic " + base64.StdEncoding.EncodeToString(
-			[]byte(strings.TrimSpace(cfg.AppKey)+":"+strings.TrimSpace(cfg.AppSecret))),
-		http: &http.Client{Timeout: timeout, Transport: transport},
+			[]byte(key+":"+secret)),
+		appKey:    key,
+		appSecret: secret,
+		http:      &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 
 // Enabled 报告客户端是否可用（New 返回 nil 即未启用）。
 func (c *Client) Enabled() bool { return c != nil }
 
-// BaseURL 返回归一化后的网关地址（观测/日志用）。
-func (c *Client) BaseURL() string { return c.baseURL }
+// BaseURL 返回归一化后的网关地址（观测/日志用）；未启用返回空串。
+// 与 Enabled/Models/Creds 一样对 nil 接收者安全——面板在未启用时也要能回显状态。
+func (c *Client) BaseURL() string {
+	if c == nil {
+		return ""
+	}
+	return c.baseURL
+}
+
+// Creds 返回当前 Basic 鉴权对原文。仅供面板"部分字段测试"时补齐未填写的那一项，
+// 不对外回显——面板状态接口只报 enabled/base_url/models，不吐密钥。
+func (c *Client) Creds() (key, secret string) {
+	if c == nil {
+		return "", ""
+	}
+	return c.appKey, c.appSecret
+}
 
 // Models 返回上游模型 id 列表，1 小时缓存；失败回退上次成功结果，
 // 从未成功则返回 nil（/v1/models 里该域自然为空，不编造）。
@@ -119,6 +141,23 @@ func (c *Client) Models(ctx context.Context) []string {
 	c.models, c.modelsFetchedAt = ids, time.Now()
 	c.mu.Unlock()
 	return ids
+}
+
+// Probe 强制拉一次 /v2/models（绕过 1h 缓存，成功后顺带刷新缓存）。
+// 供面板"连通性测试"用：用户刚填完凭证要立刻知道能不能通，等不到缓存过期。
+// 返回模型 id 列表；失败返回 error（不回退旧缓存，避免"看起来通了"的假象）。
+func (c *Client) Probe(ctx context.Context) ([]string, error) {
+	if c == nil {
+		return nil, fmt.Errorf("officeace client not configured")
+	}
+	ids, err := c.fetchModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.models, c.modelsFetchedAt = ids, time.Now()
+	c.mu.Unlock()
+	return ids, nil
 }
 
 func (c *Client) fetchModels(ctx context.Context) ([]string, error) {

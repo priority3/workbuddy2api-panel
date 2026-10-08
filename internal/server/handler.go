@@ -124,6 +124,11 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+
+	// oa officeace 通道客户端的活引用。与 cfg.OfficeAce（装配期快照）分离：
+	// 面板改配置后要热替换，cfg 不可变，故运行时一律经 officeaceClient() 读取。
+	oaMu     sync.RWMutex
+	oaClient *officeace.Client
 }
 
 // NewHandler 构建 handler。
@@ -140,7 +145,8 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	// oa 通道初始客户端来自 cfg（装配期快照），之后可被 SetOfficeAce 热替换。
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), oaClient: cfg.OfficeAce}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -437,9 +443,9 @@ func (h *Handler) modelList() []map[string]any {
 	// officeace（"oa:" realm）模型名单：客户端未配置（nil）时静默跳过。
 	// 名单来自上游 /v2/models 动态拉取（1h 缓存，失败回退上次成功值/空）。
 	// 失败不阻塞 cn/global 名单输出——oa 域请求会拿到明确的 503/上游状态码。
-	if h.cfg.OfficeAce.Enabled() {
+	if h.officeaceClient().Enabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		for _, id := range h.cfg.OfficeAce.Models(ctx) {
+		for _, id := range h.officeaceClient().Models(ctx) {
 			out = append(out, map[string]any{
 				"id":       "oa:" + id,
 				"object":   "model",

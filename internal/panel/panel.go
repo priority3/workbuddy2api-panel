@@ -24,6 +24,7 @@ import (
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/officeace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
@@ -65,6 +66,12 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// OfficeAceClient 读取当前生效的 OfficeAce（"oa:" realm）客户端；nil 或返回
+	// nil = 通道未启用（面板状态页显示未启用、测试接口报"未配置凭证"）。
+	// 走闭包而不是直接存指针：客户端在面板保存配置时会被整体替换，闭包始终
+	// 取到最新那一个。
+	OfficeAceClient func() *officeace.Client
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -186,6 +193,18 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	// OfficeAce 独立通道（"oa:" realm）：状态回显 + 保存前连通性自测。
+	p.mux.HandleFunc("GET /panel/api/officeace", p.withAuth(p.officeaceStatus))
+	p.mux.HandleFunc("POST /panel/api/officeace/test", p.withAuth(p.officeaceTest))
+}
+
+// officeaceClient 当前生效的 OfficeAce 客户端；未装配（或已关闭）时返回 nil。
+// 所有 officeace.* 上的方法都对 nil 接收者安全，调用方无需再判空。
+func (p *Panel) officeaceClient() *officeace.Client {
+	if p.cfg.OfficeAceClient == nil {
+		return nil
+	}
+	return p.cfg.OfficeAceClient()
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

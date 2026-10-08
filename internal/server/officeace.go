@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/officeace"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
 )
 
@@ -22,7 +23,8 @@ import (
 // Content-Type 与 body 原样回写。流式经 chatStatsReader 抓末帧 usage
 // （与 cn/global 通道同一统计口径），非流式解析响应体 usage 字段。
 func (h *Handler) officeaceChat(w http.ResponseWriter, r *http.Request, body []byte, bareModel string, stream bool, st *chatStat) {
-	if !h.cfg.OfficeAce.Enabled() {
+	oa := h.officeaceClient()
+	if !oa.Enabled() {
 		st.status = http.StatusServiceUnavailable
 		st.outcome = "officeace_disabled"
 		writeOpenAIError(w, http.StatusServiceUnavailable, "officeace_disabled",
@@ -38,7 +40,7 @@ func (h *Handler) officeaceChat(w http.ResponseWriter, r *http.Request, body []b
 	}
 
 	started := time.Now()
-	resp, err := h.cfg.OfficeAce.Chat(r.Context(), outBody, stream)
+	resp, err := oa.Chat(r.Context(), outBody, stream)
 	if err != nil {
 		if r.Context().Err() != nil {
 			st.status = 499 // 客户端断连（日志口径，与主通道一致）
@@ -124,6 +126,26 @@ func (h *Handler) officeaceChat(w http.ResponseWriter, r *http.Request, body []b
 	w.WriteHeader(http.StatusOK)
 	w.Write(raw)
 	h.recordOfficeAceUsageSync(bareModel, parsed.Usage, started)
+}
+
+// officeaceClient 返回当前生效的 OfficeAce 客户端（可被面板热替换）。
+func (h *Handler) officeaceClient() *officeace.Client {
+	h.oaMu.RLock()
+	c := h.oaClient
+	h.oaMu.RUnlock()
+	return c
+}
+
+// OfficeAce 返回当前生效的 OfficeAce 客户端（面板状态/测试接口读取用；nil = 未启用）。
+func (h *Handler) OfficeAce() *officeace.Client { return h.officeaceClient() }
+
+// SetOfficeAce 热替换 OfficeAce 通道客户端（面板保存配置后调用）。
+// 传 nil = 关闭通道（oa: 模型随即返回 503 officeace_disabled）。
+// 已在处理中的请求仍用旧客户端跑完，不受影响。
+func (h *Handler) SetOfficeAce(c *officeace.Client) {
+	h.oaMu.Lock()
+	h.oaClient = c
+	h.oaMu.Unlock()
 }
 
 // relayHeader 透传对下游有意义的响应头（SSE 依赖 Content-Type 判流式）。

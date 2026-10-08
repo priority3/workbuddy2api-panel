@@ -236,6 +236,10 @@ POST /v1/chat/completions
 
 上游是标准 OpenAI 兼容协议（含 SSE 流式），`reasoning_content` 字段原样透传；用量计入 `oa` realm（uid `officeace`），与账号池在用量视图天然区分。凭证获取方式见仓库外文档（OfficeAce 桌面端 `~/Library/Application Support/OfficeClaw/secrets/oauth-*.json`，AES-256-GCM，key = sha256(`.oauth-profile-encryption-key` 内容)）。
 
+**面板配置（推荐）**：管理面板 →「配置」→「OfficeAce 通道（`oa:` 模型）」，可在线开关、改网关地址与凭证，并点「测试连通性」直连上游拉一次模型列表验证（留空的字段自动沿用正在生效的值，方便只改一项时单独验证）。整段配置**保存后立即生效，无需重启**。
+
+配套接口：`GET /panel/api/officeace`（通道现状：启用态 / 实际网关 / 模型数，不回显密钥）、`POST /panel/api/officeace/test`（连通性测试，可带一组尚未保存的凭证）。
+
 ## 快速开始
 
 ### 环境要求

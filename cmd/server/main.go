@@ -166,23 +166,11 @@ func main() {
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
-	// officeace（"oa:" realm）独立通道：config 之外允许环境变量兜底凭证
-	//（密钥不落 config 文件的部署方式）。凭证最终为空时 client 为 nil = 未启用。
-	oaKey, oaSecret := cfg.OfficeAce.AppKey, cfg.OfficeAce.AppSecret
-	if oaKey == "" {
-		oaKey = os.Getenv("OFFICEACE_APP_KEY")
-	}
-	if oaSecret == "" {
-		oaSecret = os.Getenv("OFFICEACE_APP_SECRET")
-	}
-	var oaClient *officeace.Client
+	// officeace（"oa:" realm）独立通道。构造逻辑抽成 buildOfficeAce：面板保存
+	// 配置时用同一套规则重建客户端并热替换（见 saveConfig 的 oaApply），避免
+	// "启动路径"与"热改路径"两套规则漂移（例如环境变量兜底只在启动时生效）。
+	oaClient := buildOfficeAce(*cfg)
 	if cfg.OfficeAce.Enabled {
-		oaClient = officeace.New(officeace.Config{
-			BaseURL:        cfg.OfficeAce.BaseURL,
-			AppKey:         oaKey,
-			AppSecret:      oaSecret,
-			TimeoutSeconds: cfg.OfficeAce.TimeoutSeconds,
-		})
 		if oaClient == nil {
 			log.Printf("officeace 通道已启用但缺少凭证（config officeace.app_key/app_secret 或环境变量 OFFICEACE_APP_KEY/OFFICEACE_APP_SECRET），oa: 模型将返回 503")
 		} else {
@@ -286,6 +274,9 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// h 在 panel 之后装配（面板的若干接口需要读网关运行期状态），但 SaveConfig
+	// 与 OfficeAceClient 都是闭包、只在请求时取值，故此处先声明变量后赋值即可。
+	var h *server.Handler
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -306,7 +297,20 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, func(c *officeace.Client) {
+				oaClient = c // 与 handler 内引用保持同一实例（观测/重装配口径一致）
+				if h != nil {
+					h.SetOfficeAce(c)
+				}
+			})
+		},
+		// OfficeAce 状态/测试接口读的是网关当前生效实例：面板改完配置热替换后，
+		// 下一次状态查询立刻反映新值（无需重启）。
+		OfficeAceClient: func() *officeace.Client {
+			if h == nil {
+				return oaClient
+			}
+			return h.OfficeAce()
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -315,7 +319,7 @@ func main() {
 	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
-	h := server.NewHandler(server.Config{
+	h = server.NewHandler(server.Config{
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
@@ -445,7 +449,30 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+// buildOfficeAce 按配置构造 OfficeAce 客户端；未启用或缺凭证返回 nil（= 通道关闭）。
+//
+// 与启动路径共用一套规则（含环境变量兜底），供 saveConfig 热改时复用——
+// 否则「环境变量里配了凭证、面板改了 base_url」这类组合会在热改后丢凭证。
+func buildOfficeAce(cfg Config) *officeace.Client {
+	if !cfg.OfficeAce.Enabled {
+		return nil
+	}
+	key, secret := cfg.OfficeAce.AppKey, cfg.OfficeAce.AppSecret
+	if key == "" {
+		key = os.Getenv("OFFICEACE_APP_KEY")
+	}
+	if secret == "" {
+		secret = os.Getenv("OFFICEACE_APP_SECRET")
+	}
+	return officeace.New(officeace.Config{
+		BaseURL:        cfg.OfficeAce.BaseURL,
+		AppKey:         key,
+		AppSecret:      secret,
+		TimeoutSeconds: cfg.OfficeAce.TimeoutSeconds,
+	})
+}
+
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, oaApply func(*officeace.Client)) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -531,6 +558,11 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
+	// OfficeAce 通道整段热生效（开关 / 网关地址 / 凭证 / 超时）：重建客户端并替换
+	// 网关引用，oa: 模型不需要重启进程。关掉开关（或凭证被清空）时传 nil = 关闭通道。
+	if oaApply != nil {
+		oaApply(buildOfficeAce(*newCfg))
+	}
 
 	return restartRequiredFields(newCfg), nil
 }

@@ -986,6 +986,11 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  officeace_enabled: ['officeace', 'enabled'],
+  officeace_base_url: ['officeace', 'base_url'],
+  officeace_app_key: ['officeace', 'app_key'],
+  officeace_app_secret: ['officeace', 'app_secret'],
+  officeace_timeout_seconds: ['officeace', 'timeout_seconds'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -997,8 +1002,11 @@ const CFG_MAP = {
  *
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
+ *
+ * officeace_base_url 同理（清空 = 回到内置官方地址）；但 officeace 的两个凭证字段
+ * 刻意不在列——「清空凭证」没有业务含义，误触即废通道，要停用请用 enabled 开关。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'officeace_base_url']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1023,6 +1031,7 @@ async function loadConfig() {
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
     $('cfgNote').textContent = '';
+    loadOfficeAceState(); // 通道现状（独立于配置文件，读的是进程内生效实例）
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 function collectConfig() {
@@ -1101,6 +1110,61 @@ $('cfgForm').onsubmit = async ev => {
     loadOverview(true);
   } catch (e) { toast('保存失败：' + e.message, 'err'); }
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
+};
+
+/* ── OfficeAce 通道 ───────────────────────────────────────────────────
+   状态读的是进程内**当前生效**的实例（GET /panel/api/officeace），不是 config.json
+   的文本——面板保存后热替换了客户端，这里下一次刷新就能看到新值。
+   测试接口允许带上尚未保存的表单值，失败返回 200 + ok:false（探测结果不是错误）。 */
+
+// loadOfficeAceState 回显通道现状：启用态 + 实际网关 + 模型数。
+async function loadOfficeAceState() {
+  const el = $('oaState');
+  if (!el) return;
+  el.textContent = '读取中…';
+  try {
+    const d = await api('officeace');
+    el.textContent = d.enabled
+      ? '已启用 · ' + (d.base_url || '—') + ' · ' + (d.models || 0) + ' 个模型'
+      : '未启用（未配置凭证或开关关闭）';
+    el.title = d.base_url || '';
+  } catch (e) { el.textContent = '状态读取失败'; }
+}
+$('btnOaEye').onclick = () => {
+  const el = $('oaKey');
+  const show = el.type === 'password';
+  el.type = show ? 'text' : 'password';
+  $('btnOaEye').textContent = show ? '隐藏' : '显示';
+};
+// 测试连通性：按表单现值（留空项沿用正在生效的值）直连上游拉一次模型列表。
+$('btnOaTest').onclick = async () => {
+  const f = $('cfgForm'), out = $('oaTestOut'), btn = $('btnOaTest');
+  const val = n => (f.elements[n] ? String(f.elements[n].value || '').trim() : '');
+  btn.disabled = true; btn.textContent = '测试中…';
+  out.textContent = '连接中…'; out.className = 'note';
+  try {
+    const d = await api('officeace/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        base_url: val('officeace_base_url'),
+        app_key: val('officeace_app_key'),
+        app_secret: val('officeace_app_secret'),
+      }),
+    });
+    if (!d.ok) {
+      out.textContent = '失败：' + (d.error || '未知错误');
+      out.className = 'note err';
+      toast('OfficeAce 连通性测试失败：' + (d.error || '未知错误'), 'err');
+      return;
+    }
+    const sample = (d.sample || []).slice(0, 5).join('、');
+    out.textContent = '连通 · ' + (d.latency_ms || 0) + 'ms · ' + (d.models || 0) + ' 个模型' + (sample ? '（' + sample + '…）' : '');
+    out.className = 'note ok';
+    toast('OfficeAce 连通：' + (d.models || 0) + ' 个模型可用', 'ok');
+  } catch (e) {
+    out.textContent = '测试失败：' + e.message;
+    out.className = 'note err';
+  } finally { btn.disabled = false; btn.textContent = '测试连通性'; }
 };
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
