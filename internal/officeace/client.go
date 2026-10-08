@@ -69,6 +69,11 @@ func New(cfg Config) *Client {
 		base = DefaultBaseURL
 	}
 	base = strings.TrimRight(base, "/")
+	// 桌面端下发的 model_api_url_base 通常不带 scheme（如
+	// "modelgw-0004.officeace.…com"），与桌面端 normalizeBaseUrl 行为一致补 https://。
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
 	if !strings.HasSuffix(base, "/v2") {
 		base += "/v2"
 	}
@@ -76,11 +81,15 @@ func New(cfg Config) *Client {
 	if timeout <= 0 {
 		timeout = 300 * time.Second
 	}
+	// 直连（禁用环境代理）：上游是国内华为云域名，网关部署环境常见
+	// HTTP(S)_PROXY 指向出海代理，让这类请求绕代理既不稳定也无必要。
+	//（与桌面端行为一致——App 内部请求 model_api_url_base 也不走系统代理。）
+	transport := &http.Transport{Proxy: nil}
 	return &Client{
 		baseURL: base,
 		auth: "Basic " + base64.StdEncoding.EncodeToString(
 			[]byte(strings.TrimSpace(cfg.AppKey)+":"+strings.TrimSpace(cfg.AppSecret))),
-		http: &http.Client{Timeout: timeout},
+		http: &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 
