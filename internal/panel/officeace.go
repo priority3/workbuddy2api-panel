@@ -7,7 +7,9 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -93,4 +95,72 @@ func (p *Panel) officeaceTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "latency_ms": latency, "models": len(ids), "sample": sample, "base_url": oa.BaseURL(),
 	})
+}
+
+// officeaceLoginStart 发起端到端授权：向华为云要 state 并生成登录页地址。
+// 返回 {ok, authorize_url, state}——前端弹小窗打开 authorize_url，随后按
+// state 轮询 login/poll，与桌面端 LoginPage 的轮询节奏一致（1.5s）。
+func (p *Panel) officeaceLoginStart(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.OfficeAceAuthorizer == nil {
+		writeErr(w, http.StatusNotImplemented, "officeace authorize not available")
+		return
+	}
+	authorizeURL, state, err := p.cfg.OfficeAceAuthorizer.Start(r.Context())
+	if err != nil {
+		// 上游不可达等真错误：502，前端 toast 展示原因。
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	log.Printf("panel: officeace 授权已发起（state=%s...）", maskTail(state, 6))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "authorize_url": authorizeURL, "state": state,
+	})
+}
+
+// officeaceLoginPoll 轮询授权结果。
+//
+// 三种返回（HTTP 恒 200，授权状态不是接口错误）：
+//   - {ok:true, done:true}                    完成并已落盘热生效
+//   - {ok:true, done:false}                   用户还没登录完，继续轮
+//   - {ok:false, error}                       授权失败（换 token 失败/未开通/会话过期），前端应停止轮询
+func (p *Panel) officeaceLoginPoll(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.OfficeAceAuthorizer == nil || p.cfg.OfficeAceAuthorizeSave == nil {
+		writeErr(w, http.StatusNotImplemented, "officeace authorize not available")
+		return
+	}
+	state := strings.TrimSpace(r.URL.Query().Get("state"))
+	if state == "" {
+		writeErr(w, http.StatusBadRequest, "缺少 state 参数")
+		return
+	}
+	creds, err := p.cfg.OfficeAceAuthorizer.Poll(r.Context(), state)
+	switch {
+	case errors.Is(err, officeace.ErrPending):
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": false})
+		return
+	case err != nil:
+		log.Printf("panel: officeace 授权失败: %v", err)
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if err := p.cfg.OfficeAceAuthorizeSave(*creds); err != nil {
+		log.Printf("panel: officeace 凭证落盘失败: %v", err)
+		writeErr(w, http.StatusInternalServerError, "凭证已获取但写入配置失败: "+err.Error())
+		return
+	}
+	log.Printf("panel: officeace 授权完成 user=%s base=%s（凭证已写入配置并热生效）",
+		creds.UserName, maskTail(creds.BaseURL, 8))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "done": true,
+		"base_url": creds.BaseURL,
+		"user":     creds.UserName,
+	})
+}
+
+// maskTail 日志脱敏：只露尾部几字符便于对账，不泄露全文。
+func maskTail(s string, n int) string {
+	if len(s) <= n {
+		return strings.Repeat("*", len(s))
+	}
+	return "..." + s[len(s)-n:]
 }

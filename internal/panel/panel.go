@@ -72,6 +72,14 @@ type Config struct {
 	// 走闭包而不是直接存指针：客户端在面板保存配置时会被整体替换，闭包始终
 	// 取到最新那一个。
 	OfficeAceClient func() *officeace.Client
+
+	// OfficeAceAuthorizer 端到端授权器（浏览器登录 → 云端 code → 换凭证）；
+	// nil = 授权端点返回 501。
+	OfficeAceAuthorizer *officeace.Authorizer
+	// OfficeAceAuthorizeSave 授权成功后的落盘回调（写 config officeace 段 +
+	// 热替换客户端），由 main 注入；nil = 授权端点返回 501。失败则授权结果
+	// 不生效并原样返回错误给前端。
+	OfficeAceAuthorizeSave func(creds officeace.AuthorizedCreds) error
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
@@ -193,9 +201,11 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
-	// OfficeAce 独立通道（"oa:" realm）：状态回显 + 保存前连通性自测。
+	// OfficeAce 独立通道（"oa:" realm）：状态回显 + 保存前连通性自测 + 端到端授权。
 	p.mux.HandleFunc("GET /panel/api/officeace", p.withAuth(p.officeaceStatus))
 	p.mux.HandleFunc("POST /panel/api/officeace/test", p.withAuth(p.officeaceTest))
+	p.mux.HandleFunc("POST /panel/api/officeace/login/start", p.withAuth(p.officeaceLoginStart))
+	p.mux.HandleFunc("GET /panel/api/officeace/login/poll", p.withAuth(p.officeaceLoginPoll))
 }
 
 // officeaceClient 当前生效的 OfficeAce 客户端；未装配（或已关闭）时返回 nil。

@@ -170,12 +170,34 @@ func main() {
 	// 配置时用同一套规则重建客户端并热替换（见 saveConfig 的 oaApply），避免
 	// "启动路径"与"热改路径"两套规则漂移（例如环境变量兜底只在启动时生效）。
 	oaClient := buildOfficeAce(*cfg)
+	// h 在 panel 之后装配（面板的若干接口需要读网关运行期状态），但下方闭包
+	// 都只在请求时取值，故此处先声明变量后赋值即可。
+	var h *server.Handler
 	if cfg.OfficeAce.Enabled {
 		if oaClient == nil {
 			log.Printf("officeace 通道已启用但缺少凭证（config officeace.app_key/app_secret 或环境变量 OFFICEACE_APP_KEY/OFFICEACE_APP_SECRET），oa: 模型将返回 503")
 		} else {
 			log.Printf("officeace 通道已启用：%s", oaClient.BaseURL())
 		}
+	}
+	// officeace 端到端授权：浏览器华为云登录 → 云端 code → 换凭证。授权成功后
+	// 的"落盘 + 热替换"与 saveConfig 的 oaApply 走同一引用（oaClient / h），
+	// 保证面板状态、/v1/models 与转发路径看到的是同一个新客户端。
+	oaAuthorizer := officeace.NewAuthorizer()
+	applyOfficeAceCreds := func(creds officeace.AuthorizedCreds) error {
+		if err := saveOfficeAceCreds(*cfgPath, creds); err != nil {
+			return err
+		}
+		oaClient = officeace.New(officeace.Config{
+			BaseURL:        creds.BaseURL,
+			AppKey:         creds.AppKey,
+			AppSecret:      creds.AppSecret,
+			TimeoutSeconds: cfg.OfficeAce.TimeoutSeconds,
+		})
+		if h != nil {
+			h.SetOfficeAce(oaClient)
+		}
+		return nil
 	}
 	// model.json 本地缓存接线（context_length/max_output_tokens 四级查找链第 3 级）：
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
@@ -274,9 +296,6 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
-	// h 在 panel 之后装配（面板的若干接口需要读网关运行期状态），但 SaveConfig
-	// 与 OfficeAceClient 都是闭包、只在请求时取值，故此处先声明变量后赋值即可。
-	var h *server.Handler
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -312,6 +331,8 @@ func main() {
 			}
 			return h.OfficeAce()
 		},
+		OfficeAceAuthorizer:  oaAuthorizer,
+		OfficeAceAuthorizeSave: applyOfficeAceCreds,
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
@@ -449,8 +470,57 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-// buildOfficeAce 按配置构造 OfficeAce 客户端；未启用或缺凭证返回 nil（= 通道关闭）。
-//
+// saveOfficeAceCreds 把端到端授权拿到的模型网关凭证写入 config.json 的
+// officeace 段（enabled=true + base_url/app_key/app_secret），保留文件里其余
+// 键不动（与 saveConfig 同款"先合并再原子写"），随后由调用方热替换客户端。
+func saveOfficeAceCreds(path string, creds officeace.AuthorizedCreds) error {
+	oldRaw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read current config: %w", err)
+	}
+	var cur map[string]any
+	if err := json.Unmarshal(oldRaw, &cur); err != nil {
+		cur = map[string]any{}
+	}
+	cur["officeace"] = map[string]any{
+		"enabled":   true,
+		"base_url":  creds.BaseURL,
+		"app_key":   creds.AppKey,
+		"app_secret": creds.AppSecret,
+	}
+	out, err := json.MarshalIndent(cur, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		if !errors.Is(err, syscall.EBUSY) {
+			return fmt.Errorf("replace config: %w", err)
+		}
+		// Docker 单文件 bind mount：rename 不可用，原地截断重写（同 saveConfig 兜底）。
+		f, openErr := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+		if openErr != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("replace config (bind mount fallback): %w", openErr)
+		}
+		if _, writeErr := f.Write(out); writeErr != nil {
+			return fmt.Errorf("replace config (bind mount fallback, 完整新内容保留在 %s): %w", tmp, writeErr)
+		}
+		if err := f.Sync(); err != nil {
+			return fmt.Errorf("sync config: %w", err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("close config: %w", err)
+		}
+		_ = os.Remove(tmp)
+	}
+	return nil
+}
+
+// buildOfficeAce 按配置构造 OfficeAce 客户端；未启用或缺凭证返回 nil（= 通道关闭）。//
 // 与启动路径共用一套规则（含环境变量兜底），供 saveConfig 热改时复用——
 // 否则「环境变量里配了凭证、面板改了 base_url」这类组合会在热改后丢凭证。
 func buildOfficeAce(cfg Config) *officeace.Client {

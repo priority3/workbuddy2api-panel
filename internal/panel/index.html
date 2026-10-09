@@ -1272,15 +1272,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>
-      <!-- OfficeAce：独立通道（非账号，不进池） -->
+      <!-- OfficeAce：独立通道（非账号，不进池）——端到端授权 -->
       <div id="addTabOfficeace" class="tab-panel" hidden>
         <div class="hint" style="margin-bottom:8px">
-          OfficeAce 不是 WorkBuddy 账号，<b>不进账号池</b>（没有选号/签到/余额这些概念），
-          所以不在上面的账号列表里。它以独立上游的形式接入：在「配置」页填桌面端的
-          <code>app_key</code> / <code>app_secret</code>，调用时模型名加 <code>oa:</code> 前缀即可。
+          OfficeAce 不是 WorkBuddy 账号，<b>不进账号池</b>。点下面的按钮后会打开华为云登录页，
+          用你的华为云账号登录并授权，网关会<b>自动拿到模型网关凭证并写入配置</b>（无需手填
+          <code>app_key</code> / <code>app_secret</code>），完成后即可用 <code>oa:模型名</code> 调用。
         </div>
         <div class="state" id="addOaState">读取中…</div>
+        <div id="addOaAuthing" class="state" hidden><span class="dots">等待浏览器授权完成，自动检测中（最长 5 分钟）</span></div>
+        <div id="addOaErr" class="state err" hidden></div>
         <div class="inline" style="margin-top:10px">
+          <button type="button" class="xs primary" id="btnAddOaAuth">授权 OfficeAce</button>
           <button type="button" class="xs" id="btnAddOaTest">测试连通性</button>
           <button type="button" class="xs" id="btnAddOaGo">前往配置</button>
         </div>
