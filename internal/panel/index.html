@@ -654,6 +654,23 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
       </div>
 
+      <div class="box" id="oaPoolCard">
+        <header>
+          <h3>OfficeAce 通道<span class="hint">独立上游，不占账号池 · 调用时模型名加 <code>oa:</code> 前缀</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="oaPoolState">—</span>
+          <button class="xs primary" id="btnPoolOaAuth">授权 / 重新授权</button>
+          <button class="xs" id="btnPoolOaTest">测试连通</button>
+          <button class="xs" id="btnPoolOaClear">断开授权</button>
+        </header>
+        <div class="pad">
+          <div id="oaPoolAuthing" class="state" hidden><span class="dots">等待浏览器授权完成，自动检测中</span></div>
+          <div id="oaPoolMsg" class="state err" hidden></div>
+          <div class="hint">点「授权」会弹出华为云登录页，登录并同意后网关自动取回凭证、写入配置并即时生效（无需重启、无需手填任何 key）。
+            通道不参与签到/余额/选号，用量在「用量」页按 <code>oa</code> 域单独统计。</div>
+        </div>
+      </div>
+
       <div class="box" id="expBox" hidden>
         <header>
           <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
@@ -1085,40 +1102,29 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <header><h3>OfficeAce 通道（<code>oa:</code> 模型）</h3><span class="grow"></span><span class="note" id="oaState">—</span></header>
           <div class="pad">
             <div class="hint" style="margin-bottom:10px">
-              OfficeAce 桌面端的额度本质是一对华为云 ModelArts 网关的静态 Basic 凭证
-              （<code>app_key</code> / <code>app_secret</code>）。填进来之后，本网关会把它作为
-              <b>独立通道</b>暴露成 <code>oa:模型名</code>——不进 WorkBuddy 账号池、不参与
-              选号/冷却/熔断，失败原样透传上游状态码。调用示例：
-              <code>model: "oa:glm-5.2"</code>。<br>
-              凭证从桌面端导出：<code>~/Library/Application Support/OfficeClaw/secrets/oauth-*.json</code>
-              里的 <code>model_app_key</code> / <code>model_app_secret</code>（文件是 AES-256-GCM 加密的，需先解密）。
+              OfficeAce 是华为云 ModelArts 的静态 Basic 凭证通道，本网关把它作为
+              <b>独立通道</b>暴露成 <code>oa:模型名</code>——不进账号池、不参与选号/冷却/熔断，
+              失败原样透传上游状态码。调用示例：<code>model: "oa:glm-5.2"</code>。<br>
+              凭证<b>不需要手填</b>：点下面的按钮走华为云登录授权，网关自动取回并写盘。
             </div>
+            <div class="inline">
+              <button type="button" class="primary" id="btnCfgOaAuth">授权 OfficeAce</button>
+              <button type="button" id="btnCfgOaTest">测试连通性</button>
+              <button type="button" id="btnCfgOaClear">断开授权</button>
+              <span class="note" id="oaTestOut">未测试</span>
+            </div>
+            <div id="cfgOaAuthing" class="state" hidden><span class="dots">等待浏览器授权完成，自动检测中</span></div>
+            <div id="cfgOaMsg" class="state err" hidden></div>
+            <div class="hr"></div>
             <div class="switch"><span class="lb">启用 OfficeAce 通道</span>
               <input type="checkbox" name="officeace_enabled"></div>
-            <div class="hr"></div>
-            <label class="fld"><span class="lb">网关地址（base_url）</span>
-              <input name="officeace_base_url" placeholder="留空 = 内置官方地址">
-              <span class="hint">桌面端凭证里的 model_api_url_base；不带 scheme 时自动补 https://，缺 /v2 自动补</span></label>
-            <div class="grid2">
-              <label class="fld"><span class="lb">app_key</span>
-                <div class="inline"><input name="officeace_app_key" id="oaKey" type="password" placeholder="留空 = 沿用现值">
-                <button type="button" class="xs" id="btnOaEye">显示</button></div>
-                <span class="hint">也可改用环境变量 OFFICEACE_APP_KEY 注入（不落配置文件）</span></label>
-              <label class="fld"><span class="lb">app_secret</span>
-                <input name="officeace_app_secret" type="password" placeholder="留空 = 沿用现值">
-                <span class="hint">也可改用环境变量 OFFICEACE_APP_SECRET 注入</span></label>
-            </div>
             <label class="fld"><span class="lb">单请求超时（秒）</span>
               <input name="officeace_timeout_seconds" type="number" min="1" placeholder="300">
               <span class="hint">含 SSE 全程；留空沿用现值。改动保存后立即生效，无需重启</span></label>
-            <div class="hr"></div>
-            <div class="inline">
-              <button type="button" id="btnOaTest">测试连通性</button>
-              <span class="note" id="oaTestOut">未测试</span>
-            </div>
-            <div class="hint" style="margin-top:6px">
-              「测试连通性」按<b>当前表单里填的值</b>直连上游拉一次模型列表（不保存、不影响线上）；
-              某一项留空则自动沿用正在生效的现值，方便只改网关地址或只换 secret 时单独验证。
+            <div class="hint" style="margin-top:8px">
+              网关地址与凭证由授权流程写入（<code>officeace.base_url / app_key / app_secret</code>），
+              页面上不提供手工填写；特殊部署可改用环境变量
+              <code>OFFICEACE_APP_KEY</code> / <code>OFFICEACE_APP_SECRET</code> 注入。
             </div>
           </div>
         </div>

@@ -349,7 +349,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
-  if (v === 'accounts') loadExpiry();
+  if (v === 'accounts') { loadExpiry(); refreshOaStates(); } // 账号池页的 OfficeAce 通道卡片
   if (v === 'taskscenter') reattachQueueView();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
@@ -987,9 +987,6 @@ const CFG_MAP = {
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
   officeace_enabled: ['officeace', 'enabled'],
-  officeace_base_url: ['officeace', 'base_url'],
-  officeace_app_key: ['officeace', 'app_key'],
-  officeace_app_secret: ['officeace', 'app_secret'],
   officeace_timeout_seconds: ['officeace', 'timeout_seconds'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
@@ -1003,10 +1000,10 @@ const CFG_MAP = {
  * 刻意不含 api_key：清空它 = 关闭整个鉴权，误触代价是网关变成无鉴权公开服务。
  * 该字段（以及提示文案"留空 = 不鉴权"与现状不符的问题）单独处理。
  *
- * officeace_base_url 同理（清空 = 回到内置官方地址）；但 officeace 的两个凭证字段
- * 刻意不在列——「清空凭证」没有业务含义，误触即废通道，要停用请用 enabled 开关。
+ * officeace 的 base_url/app_key/app_secret 已不在表单里（凭证走端到端授权回写，
+ * 页面不手填），断开授权走专用按钮直接提交空值清空。
  */
-const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file', 'officeace_base_url']);
+const CLEARABLE_CFG = new Set(['user_agent', 'prompt_file']);
 
 function dig(obj, path) { return path.reduce((o, k) => (o == null ? undefined : o[k]), obj); }
 function put(obj, path, val) {
@@ -1031,7 +1028,7 @@ async function loadConfig() {
     }
     markDurationFields(); // 回填后重置校验态（清掉残留红框；现值来自后端必然合法）
     $('cfgNote').textContent = '';
-    loadOfficeAceState(); // 通道现状（独立于配置文件，读的是进程内生效实例）
+    refreshOaStates(); // 通道现状（独立于配置文件，读的是进程内生效实例）
   } catch (e) { toast('读取配置失败：' + e.message, 'err'); }
 }
 function collectConfig() {
@@ -1112,45 +1109,38 @@ $('cfgForm').onsubmit = async ev => {
   finally { btn.disabled = false; btn.textContent = '保存配置'; }
 };
 
-/* ── OfficeAce 通道 ───────────────────────────────────────────────────
+/* ── OfficeAce 通道（端到端授权，页面不手填凭证）──────────────────────
    状态读的是进程内**当前生效**的实例（GET /panel/api/officeace），不是 config.json
-   的文本——面板保存后热替换了客户端，这里下一次刷新就能看到新值。
-   测试接口允许带上尚未保存的表单值，失败返回 200 + ok:false（探测结果不是错误）。 */
+   的文本——授权/保存后热替换了客户端，这里下一次刷新就能看到新值。
+   凭证的唯一入口是「授权」按钮：华为云登录 → 云端发码 → 网关自动回写。
+   同一套授权/测试/断开逻辑被三个入口复用：添加账号弹窗、配置页、账号池卡片。 */
 
-// loadOfficeAceState 回显通道现状：启用态 + 实际网关 + 模型数。
-async function loadOfficeAceState() {
-  const el = $('oaState');
-  if (!el) return;
-  el.textContent = '读取中…';
-  try {
-    const d = await api('officeace');
-    el.textContent = d.enabled
-      ? '已启用 · ' + (d.base_url || '—') + ' · ' + (d.models || 0) + ' 个模型'
-      : '未启用（未配置凭证或开关关闭）';
-    el.title = d.base_url || '';
-  } catch (e) { el.textContent = '状态读取失败'; }
+function renderOaStateText(d) {
+  return d.enabled
+    ? '已启用 · ' + (d.base_url || '—') + ' · ' + (d.models || 0) + ' 个模型'
+    : '未启用 —— 点「授权」完成华为云登录后自动开通';
 }
-$('btnOaEye').onclick = () => {
-  const el = $('oaKey');
-  const show = el.type === 'password';
-  el.type = show ? 'text' : 'password';
-  $('btnOaEye').textContent = show ? '隐藏' : '显示';
-};
-// 测试连通性：按表单现值（留空项沿用正在生效的值）直连上游拉一次模型列表。
-$('btnOaTest').onclick = async () => {
-  const f = $('cfgForm'), out = $('oaTestOut'), btn = $('btnOaTest');
-  const val = n => (f.elements[n] ? String(f.elements[n].value || '').trim() : '');
-  btn.disabled = true; btn.textContent = '测试中…';
+// refreshOaStates 刷新三个入口的状态显示（元素不存在的入口自动跳过）。
+async function refreshOaStates() {
+  let d;
+  try { d = await api('officeace'); }
+  catch (e) {
+    for (const id of ['oaState', 'addOaState', 'oaPoolState']) {
+      const el = $(id); if (el) el.textContent = '状态读取失败';
+    }
+    return;
+  }
+  const text = renderOaStateText(d);
+  for (const id of ['oaState', 'addOaState', 'oaPoolState']) {
+    const el = $(id);
+    if (el) { el.textContent = text; el.title = d.base_url || ''; }
+  }
+}
+// testOaConnectivity 测当前生效配置（授权回写的值），结果写进指定的 note 元素。
+async function testOaConnectivity(out) {
   out.textContent = '连接中…'; out.className = 'note';
   try {
-    const d = await api('officeace/test', {
-      method: 'POST',
-      body: JSON.stringify({
-        base_url: val('officeace_base_url'),
-        app_key: val('officeace_app_key'),
-        app_secret: val('officeace_app_secret'),
-      }),
-    });
+    const d = await api('officeace/test', { method: 'POST', body: '{}' });
     if (!d.ok) {
       out.textContent = '失败：' + (d.error || '未知错误');
       out.className = 'note err';
@@ -1164,8 +1154,69 @@ $('btnOaTest').onclick = async () => {
   } catch (e) {
     out.textContent = '测试失败：' + e.message;
     out.className = 'note err';
-  } finally { btn.disabled = false; btn.textContent = '测试连通性'; }
-};
+  }
+}
+// beginOaAuthorize 公共授权流：弹华为云登录小窗 → 1.5s 轮询（5 分钟超时）。
+// ui = { btn, btnLabel, ingEl, errEl }；完成/失败都会刷新三处状态显示。
+let oaAuthTimer = null;
+function stopOaAuth() {
+  if (oaAuthTimer) { clearInterval(oaAuthTimer); oaAuthTimer = null; }
+  document.querySelectorAll('#addOaAuthing, #cfgOaAuthing, #oaPoolAuthing').forEach(el => { el.hidden = true; });
+}
+async function beginOaAuthorize(ui) {
+  const btn = ui.btn;
+  btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = '发起中…';
+  if (ui.errEl) { ui.errEl.hidden = true; ui.errEl.textContent = ''; }
+  if (ui.ingEl) ui.ingEl.hidden = false;
+  stopOaAuth();
+  try {
+    const d = await api('officeace/login/start', { method: 'POST', body: '{}' });
+    // 弹小窗（与桌面端同款交互）：授权完成由轮询感知，小窗关不关都行。
+    window.open(d.authorize_url, 'officeace-login', 'width=560,height=780');
+    const started = Date.now(), TIMEOUT = 300 * 1000;
+    oaAuthTimer = setInterval(async () => {
+      if (Date.now() - started > TIMEOUT) {
+        stopOaAuth();
+        if (ui.errEl) { ui.errEl.textContent = '授权超时（5 分钟），请重新发起'; ui.errEl.hidden = false; }
+        return;
+      }
+      try {
+        const p = await api('officeace/login/poll?state=' + encodeURIComponent(d.state));
+        if (!p.ok) { // 授权链路失败（换 token 失败/未开通等），停止并展示
+          stopOaAuth();
+          if (ui.errEl) { ui.errEl.textContent = '授权失败：' + (p.error || '未知错误'); ui.errEl.hidden = false; }
+          toast('OfficeAce 授权失败：' + (p.error || '未知错误'), 'err');
+          return;
+        }
+        if (!p.done) return; // 还没登录完，继续轮
+        stopOaAuth();
+        toast('OfficeAce 授权成功' + (p.user ? '（' + p.user + '）' : '') + '，凭证已写入配置并生效', 'ok');
+        refreshOaStates();
+      } catch { /* 网络抖动：下一轮再试 */ }
+    }, 1500);
+  } catch (e) {
+    stopOaAuth();
+    if (ui.errEl) { ui.errEl.textContent = '发起授权失败：' + e.message; ui.errEl.hidden = false; }
+  } finally { btn.disabled = false; btn.textContent = btn.dataset.label || '授权 OfficeAce'; }
+}
+// clearOaAuthorization 断开授权：清空凭证 + 关开关，立即生效（配置文件里可恢复不了，
+// 弹确认）。token 侧凭证无需撤销——Basic 凭证没有吊销端点，重新授权即覆盖。
+async function clearOaAuthorization() {
+  if (!confirm('断开 OfficeAce 授权？通道将立即关闭（oa: 模型返回 503），重新授权即可恢复。')) return;
+  try {
+    await api('config', { method: 'POST', body: JSON.stringify({ officeace: { enabled: false, app_key: '', app_secret: '' } }) });
+    toast('OfficeAce 授权已断开', 'ok');
+    refreshOaStates();
+  } catch (e) { toast('断开失败：' + e.message, 'err'); }
+}
+// 配置页三按钮。
+$('btnCfgOaAuth').onclick = () => beginOaAuthorize({ btn: $('btnCfgOaAuth'), ingEl: $('cfgOaAuthing'), errEl: $('cfgOaMsg') });
+$('btnCfgOaTest').onclick = () => testOaConnectivity($('oaTestOut'));
+$('btnCfgOaClear').onclick = clearOaAuthorization;
+// 账号池卡片三按钮（与配置页同一套逻辑，结果区各自独立）。
+$('btnPoolOaAuth').onclick = () => beginOaAuthorize({ btn: $('btnPoolOaAuth'), ingEl: $('oaPoolAuthing'), errEl: $('oaPoolMsg') });
+$('btnPoolOaTest').onclick = () => testOaConnectivity($('oaPoolState'));
+$('btnPoolOaClear').onclick = clearOaAuthorization;
 
 /* ── 添加账号 ─────────────────────────────────────────────────────── */
 function openAdd() {
@@ -1191,7 +1242,7 @@ function switchAddTab(tab) {
   if (tab === 'officeace') {
     $('btnStartLogin').hidden = true;
     $('btnAddOaGoFooter').hidden = false;
-    loadAddOaState();
+    refreshOaStates();
   } else {
     stopOaAuth(); // 离开标签页停掉授权轮询（轮询只在这个 tab 有意义）
     $('btnAddOaGoFooter').hidden = true;
@@ -1247,81 +1298,9 @@ $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textCo
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
 
 /* ── 添加账号 · OfficeAce 标签 ─────────────────────────────────────
-   只读现状 + 测当前生效配置 + 跳配置页；真正的凭证编辑在「配置」页（这里有
-   表单口径的部分字段补齐语义，弹窗里不重复一套输入框，避免两处配置漂移）。 */
-function renderOaStateText(d) {
-  return d.enabled
-    ? '已启用 · ' + (d.base_url || '—') + ' · ' + (d.models || 0) + ' 个模型可用（调用时加 oa: 前缀）'
-    : '未启用 —— 点「授权 OfficeAce」完成华为云登录后自动开通';
-}
-async function loadAddOaState() {
-  const el = $('addOaState');
-  if (!el) return;
-  el.textContent = '读取中…';
-  try { el.textContent = renderOaStateText(await api('officeace')); }
-  catch (e) { el.textContent = '状态读取失败：' + e.message; }
-}
-// —— 端到端授权：弹华为云登录小窗，按 state 轮询云端发码，成功后后端自动写盘热生效 ——
-let oaAuthTimer = null;
-function stopOaAuth() {
-  if (oaAuthTimer) { clearInterval(oaAuthTimer); oaAuthTimer = null; }
-  const ing = $('addOaAuthing');
-  if (ing) ing.hidden = true;
-}
-$('btnAddOaAuth').onclick = async () => {
-  const btn = $('btnAddOaAuth'), errEl = $('addOaErr');
-  btn.disabled = true; btn.textContent = '发起中…';
-  errEl.hidden = true;
-  try {
-    const d = await api('officeace/login/start', { method: 'POST', body: '{}' });
-    // 弹小窗（与桌面端同款交互）：授权完成由我们轮询感知，小窗关不关都行。
-    window.open(d.authorize_url, 'officeace-login', 'width=560,height=780');
-    $('addOaAuthing').hidden = false;
-    const started = Date.now(), TIMEOUT = 300 * 1000;
-    stopOaAuth();
-    oaAuthTimer = setInterval(async () => {
-      if (Date.now() - started > TIMEOUT) {
-        stopOaAuth();
-        errEl.textContent = '授权超时（5 分钟），请重新发起';
-        errEl.hidden = false;
-        return;
-      }
-      try {
-        const p = await api('officeace/login/poll?state=' + encodeURIComponent(d.state));
-        if (!p.ok) { // 授权链路失败（换 token 失败/未开通等），停止并展示
-          stopOaAuth();
-          errEl.textContent = '授权失败：' + (p.error || '未知错误');
-          errEl.hidden = false;
-          return;
-        }
-        if (!p.done) return; // 还没登录完，继续轮
-        stopOaAuth();
-        toast('OfficeAce 授权成功' + (p.user ? '（' + p.user + '）' : '') + '，凭证已写入配置并生效', 'ok');
-        loadAddOaState();
-      } catch { /* 网络抖动：下一轮再试 */ }
-    }, 1500);
-  } catch (e) {
-    errEl.textContent = '发起授权失败：' + e.message;
-    errEl.hidden = false;
-  } finally { btn.disabled = false; btn.textContent = '授权 OfficeAce'; }
-};
-$('btnAddOaTest').onclick = async () => {
-  const out = $('addOaTestOut'), btn = $('btnAddOaTest');
-  btn.disabled = true; btn.textContent = '测试中…';
-  out.textContent = '连接中…'; out.className = 'note';
-  try {
-    const d = await api('officeace/test', { method: 'POST', body: '{}' });
-    if (!d.ok) {
-      out.textContent = '失败：' + (d.error || '未知错误');
-      out.className = 'note err';
-      return;
-    }
-    out.textContent = '连通 · ' + (d.latency_ms || 0) + 'ms · ' + (d.models || 0) +
-      ' 个模型（' + (d.sample || []).slice(0, 4).join('、') + '…）';
-    out.className = 'note ok';
-  } catch (e) { out.textContent = '测试失败：' + e.message; out.className = 'note err'; }
-  finally { btn.disabled = false; btn.textContent = '测试连通性'; }
-};
+   复用公共授权/测试/状态逻辑（见「OfficeAce 通道」块）；此处只做入口绑定。 */
+$('btnAddOaAuth').onclick = () => beginOaAuthorize({ btn: $('btnAddOaAuth'), ingEl: $('addOaAuthing'), errEl: $('addOaErr') });
+$('btnAddOaTest').onclick = () => testOaConnectivity($('addOaTestOut'));
 function goToAddOaConfig() {
   closeAdd();
   go('config'); history.replaceState(null, '', '#config');
