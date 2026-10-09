@@ -310,7 +310,7 @@ func (a *Authorizer) fetchModelInfo(ctx context.Context, cred *iamCredential) (*
 	if cred.projectID != "" {
 		headers["X-Project-ID"] = cred.projectID
 	}
-	req, err := signedGetRequest(ctx, a.http, endpoint, headers, cred.access, cred.secret)
+	req, canonical, err := signedGetRequest(ctx, a.http, endpoint, headers, cred.access, cred.secret)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +321,9 @@ func (a *Authorizer) fetchModelInfo(ctx context.Context, cred *iamCredential) (*
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("权限校验失败: status %d, body %.300s", resp.StatusCode, raw)
+		// 带上本地 canonical，便于和华为云回显的 canonical_request 逐字节对比。
+		return nil, fmt.Errorf("权限校验失败: status %d, body %.300s｜本地 canonical: %s",
+			resp.StatusCode, raw, canonicalReadable(canonical))
 	}
 	var top struct {
 		Data struct {
@@ -375,33 +377,49 @@ func (a *Authorizer) pruneLocked() {
 	}
 }
 
-// signedGetRequest 构造带华为云 TC3 签名头的 GET 请求。
-func signedGetRequest(ctx context.Context, client *http.Client, rawURL string, headers map[string]string, ak, sk string) (*http.Request, error) {
+// signedGetRequest 构造带华为云 TC3 签名头的 GET 请求，并返回参与签名的
+// canonical request（排障用：可直接和华为云回显的 canonical_request 对拍）。
+func signedGetRequest(ctx context.Context, client *http.Client, rawURL string, headers map[string]string, ak, sk string) (*http.Request, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	now := time.Now().UTC().Format("20060102T150405Z")
 	req.Header.Set("x-sdk-date", now)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	auth, err := signHuaweiTC3(req, now, ak, sk)
+	auth, canonical, err := signHuaweiTC3(req, now, ak, sk)
 	if err != nil {
-		return nil, fmt.Errorf("生成 TC3 签名失败: %w", err)
+		return nil, "", fmt.Errorf("生成 TC3 签名失败: %w", err)
 	}
 	req.Header.Set("Authorization", auth)
-	return req, nil
+	return req, canonical, nil
 }
 
-// signHuaweiTC3 华为云 SDK-HMAC-SHA256 请求签名（与华为 SDK Signer 同口径）。
-// 只签 Authorization 之外我们显式设置的 header（host/x-sdk-date/content-type/
-// x-project-id/x-security-token/x-subscription-type），按字母序。
-func signHuaweiTC3(req *http.Request, sdkDate, ak, sk string) (string, error) {
+// canonicalReadable 把 canonical request 的换行换成 "|"，与华为云错误回显格式一致。
+func canonicalReadable(canonical string) string {
+	return strings.ReplaceAll(canonical, "\n", "|")
+}
+
+// signHuaweiTC3 华为云 SDK-HMAC-SHA256 请求签名。
+// 逐字节对齐桌面端 @openjiuwen/relay-shared 的 Signer：
+//   - CanonicalURI = 各段 urlEncode 后以 "/" 连接，且必须以 "/" 结尾；
+//   - 参与签名的 header = 请求里除 Authorization 外的全部 header（小写、字母序）；
+//   - header 值取 trim 后原样，每行以 "\n" 结尾，末尾再多一个 "\n"；
+//   - 非 PUT/PATCH/POST 请求的 body 视为空串。
+// 返回 Authorization 头与 canonical request。
+func signHuaweiTC3(req *http.Request, sdkDate, ak, sk string) (string, string, error) {
 	u := req.URL
-	path := u.EscapedPath()
-	if path == "" {
-		path = "/"
+	// CanonicalURI：路径按 "/" 切段、逐段 urlEncode 后再拼回，最后补尾斜杠。
+	// 漏掉尾斜杠签名必失败（华为云回显的 canonical_request 里路径带 "/"）。
+	segs := strings.Split(u.Path, "/")
+	for i := range segs {
+		segs[i] = uriEncode(segs[i])
+	}
+	path := strings.Join(segs, "/")
+	if !strings.HasSuffix(path, "/") {
+		path += "/"
 	}
 	// CanonicalQueryString：key 排序、RFC3986 编码（空格→%20）。
 	q := u.Query()
@@ -423,26 +441,33 @@ func signHuaweiTC3(req *http.Request, sdkDate, ak, sk string) (string, error) {
 			cqs.WriteString(uriEncode(v))
 		}
 	}
-	// 参与签名的 header（不含 Authorization）。
-	signNames := []string{"host", "x-sdk-date"}
-	if ct := req.Header.Get("Content-Type"); ct != "" {
-		signNames = append(signNames, "content-type")
-	}
-	for _, h := range []string{"x-project-id", "x-security-token", "x-subscription-type"} {
-		if req.Header.Get(h) != "" {
-			signNames = append(signNames, h)
+	// 参与签名的 header：请求里除 Authorization 外的全部 header（小写、字母序），
+	// 外加 host（SDK 在签名前补进 header 集合，这里同样补）。
+	lower := make(map[string]string, len(req.Header)+1)
+	signNames := make([]string, 0, len(req.Header)+1)
+	hasHost := false
+	for k, v := range req.Header {
+		lk := strings.ToLower(k)
+		if lk == "authorization" {
+			continue
 		}
+		if _, dup := lower[lk]; dup {
+			continue
+		}
+		lower[lk] = v[0]
+		signNames = append(signNames, lk)
+		if lk == "host" {
+			hasHost = true
+		}
+	}
+	if !hasHost {
+		lower["host"] = u.Host
+		signNames = append(signNames, "host")
 	}
 	sort.Strings(signNames)
 	var ch, sh strings.Builder
 	for _, h := range signNames {
-		var v string
-		if h == "host" {
-			v = u.Host
-		} else {
-			v = strings.TrimSpace(req.Header.Get(h))
-		}
-		ch.WriteString(h + ":" + v + "\n")
+		ch.WriteString(h + ":" + strings.TrimSpace(lower[h]) + "\n")
 		sh.WriteString(h + ";")
 	}
 	signedHeaders := strings.TrimSuffix(sh.String(), ";")
@@ -461,7 +486,7 @@ func signHuaweiTC3(req *http.Request, sdkDate, ak, sk string) (string, error) {
 	mac := hmac.New(sha256.New, []byte(sk))
 	mac.Write([]byte(stringToSign))
 	sig := hex.EncodeToString(mac.Sum(nil))
-	return "SDK-HMAC-SHA256 Access=" + ak + ", SignedHeaders=" + signedHeaders + ", Signature=" + sig, nil
+	return "SDK-HMAC-SHA256 Access=" + ak + ", SignedHeaders=" + signedHeaders + ", Signature=" + sig, canonical, nil
 }
 
 // uriEncode RFC3986 严格编码（华为云规范要求空格→%20、保留字全编码）。

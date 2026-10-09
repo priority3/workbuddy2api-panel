@@ -114,7 +114,7 @@ func TestSignHuaweiTC3(t *testing.T) {
 	req.Header.Set("x-sdk-date", now)
 	req.Header.Set("x-subscription-type", "v2")
 	req.Header.Set("X-Security-Token", "tok-123")
-	auth, err := signHuaweiTC3(req, now, "AKTEST", "SKTEST")
+	auth, _, err := signHuaweiTC3(req, now, "AKTEST", "SKTEST")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,14 +135,63 @@ func TestSignHuaweiTC3(t *testing.T) {
 		t.Fatalf("signature should be 64 hex chars: %s", auth)
 	}
 	// 确定性：同输入两次签名一致。
-	auth2, _ := signHuaweiTC3(req, now, "AKTEST", "SKTEST")
+	auth2, _, _ := signHuaweiTC3(req, now, "AKTEST", "SKTEST")
 	if auth != auth2 {
 		t.Fatal("TC3 signing is not deterministic for identical input")
 	}
 	// sk 变化 → 签名变化。
-	auth3, _ := signHuaweiTC3(req, now, "AKTEST", "SKOTHER")
+	auth3, _, _ := signHuaweiTC3(req, now, "AKTEST", "SKOTHER")
 	if auth3 == auth {
 		t.Fatal("different secret key must produce different signature")
+	}
+}
+
+// TestSignHuaweiTC3Golden 与桌面端真实 SDK 逐字节对拍。
+// 期望值由 OfficeAce 内置实现（@openjiuwen/relay-shared Signer，
+// runtime/packages/shared/dist/utils/signer.js）在固定输入下产出：
+//   GET https://agentarts.cn-southwest-2.myhuaweicloud.com/v1/claw/client-permission-validate
+//   headers: X-Sdk-Date=20261009T073117Z, X-Security-Token=<tok>, x-subscription-type=v2
+// 一旦这里的期望值需要改动，说明签名口径偏离了桌面端，线上必然 401。
+func TestSignHuaweiTC3Golden(t *testing.T) {
+	const (
+		ak       = "TESTAK00000000000001"
+		sk       = "TESTSK0000000000000000000000000000000000000001"
+		now      = "20261009T073117Z"
+		secToken = "hQpjbi1ub3J0aC00AQAABXlIU1RBMTNSNEo0WDFXN0QwQjU3SkG-GpuA-test-token-XYZ_abc-123"
+		wantAuth = "SDK-HMAC-SHA256 Access=TESTAK00000000000001, " +
+			"SignedHeaders=host;x-sdk-date;x-security-token;x-subscription-type, " +
+			"Signature=69a8077ba3aa7d5ea7d4550257d4ae4b6fa6555e62e3285d209f9e2d00f9d7f5"
+		// canonical request（换行分隔的 6 段：method/uri/query/headers/signed/bodyhash）
+		wantCanonical = "GET\n" +
+			"/v1/claw/client-permission-validate/\n" +
+			"\n" +
+			"host:agentarts.cn-southwest-2.myhuaweicloud.com\n" +
+			"x-sdk-date:20261009T073117Z\n" +
+			"x-security-token:" + secToken + "\n" +
+			"x-subscription-type:v2\n" +
+			"\n" +
+			"host;x-sdk-date;x-security-token;x-subscription-type\n" +
+			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	)
+	req, err := http.NewRequest(http.MethodGet,
+		"https://agentarts.cn-southwest-2.myhuaweicloud.com/v1/claw/client-permission-validate", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Sdk-Date", now)
+	req.Header.Set("X-Security-Token", secToken)
+	req.Header.Set("x-subscription-type", "v2")
+
+	auth, canonical, err := signHuaweiTC3(req, now, ak, sk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth != wantAuth {
+		t.Fatalf("authorization mismatch\n got: %s\nwant: %s", auth, wantAuth)
+	}
+	if canonical != wantCanonical {
+		t.Fatalf("canonical request mismatch\n got: %s\nwant: %s",
+			canonicalReadable(canonical), canonicalReadable(wantCanonical))
 	}
 }
 
