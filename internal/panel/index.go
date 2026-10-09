@@ -11,6 +11,9 @@ package panel
 import (
 	_ "embed"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 )
 
 //go:embed index.html
@@ -46,19 +49,20 @@ func setSecurityHeaders(w http.ResponseWriter) {
 
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
 //
-// Cache-Control: no-store——页面与 app.js 随二进制一起更新，缓存旧版会导致
-// "HTML 有新元素、JS 是旧逻辑"（或反过来）的错配：弹窗内容区空白、按钮错乱
-// （实测：改版后用户不强制刷新就复现）。文件 ~100KB，禁缓存开销可忽略。
+// app.js 引用注入启动时间戳（app.js?v=...）：CF 的 Browser Cache TTL 会覆盖
+// 源站 Cache-Control（实测 no-store 仍被改写为 max-age=14400），页面自身是
+// DYNAMIC 不被 CF 缓存，于是"HTML 新 + JS 旧"的错配只有靠 URL 版本参数破——
+// 每次进程重启 ?v= 变化，CF 缓存 key 随之 miss，用户无需强制刷新。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(indexHTML)
+	_, _ = w.Write(p.indexHTMLRendered())
 }
 
-// appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。禁缓存，
-// 原因同 index——app.js 与 index.html 必须同代，否则前端错配白屏。
+// appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
+// 头部同样带 no-store（源头层面禁缓存；CF 是否尊重取决于 zone 配置）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
@@ -66,3 +70,21 @@ func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
 }
+
+// startedAt 进程启动时间：版本参数的取值（同一次运行内恒定，保证浏览器内一致）。
+var startedAt = time.Now().Format("20060102150405")
+
+// indexHTMLRendered 返回注入了 ?v= 的页面骨架（启动后只算一次）。
+func (p *Panel) indexHTMLRendered() []byte {
+	renderOnce.Do(func() {
+		indexRendered = []byte(strings.Replace(string(indexHTML),
+			`<script src="app.js"></script>`,
+			`<script src="app.js?v=`+startedAt+`"></script>`, 1))
+	})
+	return indexRendered
+}
+
+var (
+	renderOnce    sync.Once
+	indexRendered []byte
+)
