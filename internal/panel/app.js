@@ -1184,6 +1184,18 @@ function switchAddTab(tab) {
   document.querySelectorAll('#addTabs .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
   $('addTabLogin').hidden = tab !== 'login';
   $('addTabImport').hidden = tab !== 'import';
+  $('addTabOfficeace').hidden = tab !== 'officeace';
+  // OfficeAce 不是账号、不发起 OAuth：footer 主按钮换成「前往配置」。
+  // 离开该 tab 时按登录流程实际阶段恢复 btnStartLogin 的显隐
+  //（addPick 已隐藏 = 授权链接已拿到，此刻本就不该显示「获取授权链接」）。
+  if (tab === 'officeace') {
+    $('btnStartLogin').hidden = true;
+    $('btnAddOaGoFooter').hidden = false;
+    loadAddOaState();
+  } else {
+    $('btnAddOaGoFooter').hidden = true;
+    $('btnStartLogin').hidden = !$('addPick') || $('addPick').hidden;
+  }
 }
 document.querySelectorAll('#addTabs .tab').forEach(b => {
   b.onclick = () => switchAddTab(b.dataset.tab);
@@ -1232,6 +1244,53 @@ $('btnStartLogin').onclick = startAddLogin;
 $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
+
+/* ── 添加账号 · OfficeAce 标签 ─────────────────────────────────────
+   只读现状 + 测当前生效配置 + 跳配置页；真正的凭证编辑在「配置」页（这里有
+   表单口径的部分字段补齐语义，弹窗里不重复一套输入框，避免两处配置漂移）。 */
+function renderOaStateText(d) {
+  return d.enabled
+    ? '已启用 · ' + (d.base_url || '—') + ' · ' + (d.models || 0) + ' 个模型可用（调用时加 oa: 前缀）'
+    : '未启用 —— 需要在「配置」页填入 app_key / app_secret 并打开开关';
+}
+async function loadAddOaState() {
+  const el = $('addOaState');
+  if (!el) return;
+  el.textContent = '读取中…';
+  try { el.textContent = renderOaStateText(await api('officeace')); }
+  catch (e) { el.textContent = '状态读取失败：' + e.message; }
+}
+$('btnAddOaTest').onclick = async () => {
+  const out = $('addOaTestOut'), btn = $('btnAddOaTest');
+  btn.disabled = true; btn.textContent = '测试中…';
+  out.textContent = '连接中…'; out.className = 'note';
+  try {
+    const d = await api('officeace/test', { method: 'POST', body: '{}' });
+    if (!d.ok) {
+      out.textContent = '失败：' + (d.error || '未知错误');
+      out.className = 'note err';
+      return;
+    }
+    out.textContent = '连通 · ' + (d.latency_ms || 0) + 'ms · ' + (d.models || 0) +
+      ' 个模型（' + (d.sample || []).slice(0, 4).join('、') + '…）';
+    out.className = 'note ok';
+  } catch (e) { out.textContent = '测试失败：' + e.message; out.className = 'note err'; }
+  finally { btn.disabled = false; btn.textContent = '测试连通性'; }
+};
+function goToAddOaConfig() {
+  closeAdd();
+  go('config'); history.replaceState(null, '', '#config');
+  // 等配置页渲染完再定位高亮，视觉上「跳过去就是它」。
+  requestAnimationFrame(() => setTimeout(() => {
+    const card = $('oaCard');
+    if (!card) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('flash');
+    setTimeout(() => card.classList.remove('flash'), 1800);
+  }, 60));
+}
+$('btnAddOaGo').onclick = goToAddOaConfig;
+$('btnAddOaGoFooter').onclick = goToAddOaConfig;
 $('importFile').onchange = async () => {
   const file = $('importFile').files[0];
   if (!file) return;

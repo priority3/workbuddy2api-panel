@@ -322,6 +322,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 /* OfficeAce 连通性测试结果：同 note 的版式，仅按结果着色。 */
 #oaTestOut.ok { color: var(--ok); }
 #oaTestOut.err { color: var(--bad); }
+/* 从「添加账号 → OfficeAce」跳转过来时的定位高亮（短暂描边后淡出）。 */
+#oaCard.flash { outline: 2px solid var(--info, #378ADD); outline-offset: 3px; transition: outline-color .8s; }
 
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
@@ -1079,7 +1081,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </div>
         </div>
 
-        <div class="box">
+        <div class="box" id="oaCard">
           <header><h3>OfficeAce 通道（<code>oa:</code> 模型）</h3><span class="grow"></span><span class="note" id="oaState">—</span></header>
           <div class="pad">
             <div class="hint" style="margin-bottom:10px">
@@ -1240,6 +1242,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="tabs" id="addTabs">
         <button class="tab on" data-tab="login">浏览器登录</button>
         <button class="tab" data-tab="import">导入 JSON</button>
+        <button class="tab" data-tab="officeace">OfficeAce</button>
       </div>
     </header>
     <div class="body">
@@ -1269,10 +1272,25 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>
+      <!-- OfficeAce：独立通道（非账号，不进池） -->
+      <div id="addTabOfficeace" class="tab-panel" hidden>
+        <div class="hint" style="margin-bottom:8px">
+          OfficeAce 不是 WorkBuddy 账号，<b>不进账号池</b>（没有选号/签到/余额这些概念），
+          所以不在上面的账号列表里。它以独立上游的形式接入：在「配置」页填桌面端的
+          <code>app_key</code> / <code>app_secret</code>，调用时模型名加 <code>oa:</code> 前缀即可。
+        </div>
+        <div class="state" id="addOaState">读取中…</div>
+        <div class="inline" style="margin-top:10px">
+          <button type="button" class="xs" id="btnAddOaTest">测试连通性</button>
+          <button type="button" class="xs" id="btnAddOaGo">前往配置</button>
+        </div>
+        <div class="note" id="addOaTestOut" style="margin-top:8px;white-space:normal">—</div>
+      </div>
     </div>
     <footer>
       <span class="grow"></span>
       <button id="btnStartLogin" class="primary">获取授权链接</button>
+      <button id="btnAddOaGoFooter" class="primary" hidden>前往配置</button>
       <button id="btnCopyUrl" hidden>复制链接</button>
       <button id="btnOpenUrl" class="primary" hidden>在浏览器打开</button>
       <button id="btnCloseAdd">关闭</button>
