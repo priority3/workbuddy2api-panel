@@ -70,13 +70,38 @@ func TestIndexReferencesExternalScript(t *testing.T) {
 	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `<script src="app.js"></script>`) {
-		t.Error("index.html must load app.js externally (inline script is blocked by CSP)")
+	// app.js 以外部脚本加载，且带启动时间戳版本参数（?v=...，破解 CF Browser
+	// Cache TTL——CF 会覆盖源站 Cache-Control，页面自身不被缓存，靠 URL 参数破）。
+	if !strings.Contains(body, `<script src="app.js?v=`) ||
+		!strings.Contains(body, `"></script>`) {
+		t.Error("index.html must load app.js externally with a version query (CSP forbids inline)")
 	}
 	// 反例保护：出现内联 <script>...</script> 内容块即为回归
 	if strings.Contains(body, "<script>\n") || strings.Contains(body, "<script> ") {
 		t.Error("index.html still contains an inline <script> block; CSP would block it")
 	}
+	// 版本参数在同一次运行内必须稳定（两次请求一致，浏览器一致性依赖这一点）。
+	rec2 := httptest.NewRecorder()
+	p.ServeHTTP(rec2, httptest.NewRequest("GET", "/panel/", nil))
+	v1 := scriptVersion(rec.Body.String())
+	v2 := scriptVersion(rec2.Body.String())
+	if v1 == "" || v1 != v2 {
+		t.Errorf("script version must be stable within a process: %q vs %q", v1, v2)
+	}
+}
+
+// scriptVersion 从页面 HTML 提取 app.js 的 ?v= 参数值。
+func scriptVersion(body string) string {
+	marker := `<script src="app.js?v=`
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := body[i+len(marker):]
+	if j := strings.Index(rest, `"`); j >= 0 {
+		return rest[:j]
+	}
+	return ""
 }
 
 // app.js 必须能作为同源脚本取到且类型正确（否则页面白屏）。
