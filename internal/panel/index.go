@@ -45,17 +45,24 @@ func setSecurityHeaders(w http.ResponseWriter) {
 }
 
 // index 输出面板页面（静态无秘密；数据接口 /panel/api/* 才走鉴权）。
+//
+// Cache-Control: no-store——页面与 app.js 随二进制一起更新，缓存旧版会导致
+// "HTML 有新元素、JS 是旧逻辑"（或反过来）的错配：弹窗内容区空白、按钮错乱
+// （实测：改版后用户不强制刷新就复现）。文件 ~100KB，禁缓存开销可忽略。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(indexHTML)
 }
 
-// appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
+// appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。禁缓存，
+// 原因同 index——app.js 与 index.html 必须同代，否则前端错配白屏。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
 }
